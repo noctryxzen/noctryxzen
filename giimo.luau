@@ -43,26 +43,67 @@ local function GetExecutorName(): string
 	return ok and Name or "idk this executor"
 end
 
-local function GetScriptFromFunction(Func: (...any) -> any): LuaSourceContainer?
-	if not getscripts then return nil end
-	
+local function GetScriptLocation(Func: (...any) -> any): (LuaSourceContainer?, string)
 	local ok: boolean, Info: any = SPcall(debug.getinfo, Func)
-	if not ok or not Info or not Info.source then return nil end
+	if not ok or not Info or not Info.source then return nil, "Unknown" end
 	
 	local Source: string = Info.source
 	if Source:sub(1, 1) == "@" then
 		Source = Source:sub(2)
 	end
 	
-	local AllScripts: {LuaSourceContainer} = getscripts()
-	for i: number = 1, #AllScripts do
-		local Scr: LuaSourceContainer = AllScripts[i]
-		if Scr:GetFullName() == Source or Scr.Name == Source then
-			return Scr
+	if getscripts then
+		local AllScripts: {LuaSourceContainer} = getscripts()
+		for i: number = 1, #AllScripts do
+			local Scr: LuaSourceContainer = AllScripts[i]
+			if Scr:GetFullName() == Source or Scr.Name == Source then
+				local Parent: Instance? = Scr.Parent
+				while Parent do
+					if Parent.Name == "ReplicatedFirst" then
+						return Scr, "ReplicatedFirst"
+					end
+					if Parent:IsA("Actor") then
+						return Scr, "Actor"
+					end
+					Parent = Parent.Parent
+				end
+			end
 		end
 	end
 	
-	return nil
+	if getnilinstances then
+		local ok2: boolean, NilInsts: any = SPcall(getnilinstances)
+		if ok2 and NilInsts then
+			for idx: number = 1, #NilInsts do
+				local Inst: any = NilInsts[idx]
+				if SType(Inst) == "userdata" and typeof(Inst) == "Instance" then
+					if Inst:IsA("LocalScript") or Inst:IsA("ModuleScript") then
+						if Inst:GetFullName() == Source or Inst.Name == Source then
+							return Inst, "Nil"
+						end
+					end
+				end
+			end
+		end
+	end
+	
+	if getactors then
+		local ok3: boolean, Actors: any = SPcall(getactors)
+		if ok3 and Actors then
+			for idx: number = 1, #Actors do
+				local Act: any = Actors[idx]
+				for descIdx: number, Desc: Instance in Act:GetDescendants() do
+					if Desc:IsA("LocalScript") or Desc:IsA("ModuleScript") then
+						if Desc:GetFullName() == Source or Desc.Name == Source then
+							return Desc, "Actor"
+						end
+					end
+				end
+			end
+		end
+	end
+	
+	return nil, "Unknown"
 end
 
 local function GetFunctionAddress(Func: (...any) -> any): string?
@@ -150,7 +191,7 @@ end
 local function CheckScriptHash(Func: (...any) -> any, TargetHash: string): boolean
 	if not getscripthash then return false end
 	
-	local Scr: LuaSourceContainer? = GetScriptFromFunction(Func)
+	local Scr: LuaSourceContainer?, Location: string = GetScriptLocation(Func)
 	if not Scr then return false end
 	
 	local ok: boolean, Hash: any = SPcall(getscripthash, Scr)
@@ -221,18 +262,6 @@ local function DisableFunction(Func: (...any) -> any): ()
 			end
 		end
 	end
-	
-	if debug.getprotos then
-		local ok: boolean, Protos: any = SPcall(debug.getprotos, Func)
-		if ok and Protos then
-			for i: number = 1, #Protos do
-				local Proto: any = Protos[i]
-				if SType(Proto) == "function" then
-					DisableFunction(Proto)
-				end
-			end
-		end
-	end
 end
 
 local function GetAllFunctions(): {any}
@@ -250,243 +279,141 @@ local function GetAllFunctions(): {any}
 	return {}
 end
 
-local function ScanGarbageCollector(): {string}
-	local Found: {string} = {}
-	local FoundSet: {[string]: boolean} = {}
-	
-	local Funcs: {any} = getgc and getgc(false) or {}
-	local Tables: {any} = getgc and getgc(true) or {}
-	
-	for i: number = 1, #Funcs do
-		local f: any = Funcs[i]
-		if SType(f) == "function" then
-			if isexecutorclosure and isexecutorclosure(f) then
-				continue
-			end
-			
-			if islclosure and not islclosure(f) then
-				continue
-			end
-			
-			local ok: boolean, Info: any = SPcall(debug.getinfo, f)
-			if ok and Info and Info.source then
-				local Source: string = Info.source
-				if Source:sub(1, 1) == "@" then
-					Source = Source:sub(2)
-				end
-				
-				if not FoundSet[Source] then
-					FoundSet[Source] = true
-					Found[#Found + 1] = `GC-Function: {Source}`
-				end
-			end
-		end
-	end
-	
-	for i: number = 1, #Tables do
-		local t: any = Tables[i]
-		if SType(t) == "table" then
-			local mt: any = getmetatable(t)
-			if mt and SType(mt) == "table" then
-				local src: any = rawget(mt, "__source")
-				if src and SType(src) == "string" then
-					if not FoundSet[src] then
-						FoundSet[src] = true
-						Found[#Found + 1] = `GC-Table: {src}`
-					end
-				end
-			end
-		end
-	end
-	
-	return Found
-end
-
-local function ScanRegistry(): {string}
-	local Found: {string} = {}
-	local FoundSet: {[string]: boolean} = {}
-	
-	local Reg: {any}? = nil
-	
-	if getreg then
-		SPcall(function(): ()
-			Reg = getreg()
-		end)
-	end
-	
-	if not Reg and getregistry then
-		SPcall(function(): ()
-			Reg = getregistry()
-		end)
-	end
-	
-	if not Reg then
-		return Found
-	end
-	
-	for Idx: number = 1, #Reg do
-		local Obj: any = Reg[Idx]
-		
-		if SType(Obj) == "function" then
-			if isexecutorclosure and isexecutorclosure(Obj) then
-				continue
-			end
-			
-			if islclosure and not islclosure(Obj) then
-				continue
-			end
-			
-			local ok: boolean, Info: any = SPcall(debug.getinfo, Obj)
-			if ok and Info and Info.source then
-				local Source: string = Info.source
-				if Source:sub(1, 1) == "@" then
-					Source = Source:sub(2)
-				end
-				
-				if not FoundSet[Source] then
-					FoundSet[Source] = true
-					Found[#Found + 1] = `Registry-Function: {Source}`
-				end
-			end
-		end
-		
-		if typeof(Obj) == "thread" and getscriptfromthread then
-			SPcall(function(): ()
-				local Scr: LuaSourceContainer = getscriptfromthread(Obj)
-				if Scr then
-					local Path: string = Scr:GetFullName()
-					if not FoundSet[Path] then
-						FoundSet[Path] = true
-						Found[#Found + 1] = `Registry-Thread: {Path}`
-					end
-				end
-			end)
-		end
-	end
-	
-	return Found
-end
-
-local function ScanNilInstances(): {string}
-	local Found: {string} = {}
-	
-	if not getnilinstances then
-		return Found
-	end
-	
-	SPcall(function(): ()
-		local NilInst: {Instance} = getnilinstances()
-		for Idx: number = 1, #NilInst do
-			SPcall(function(): ()
-				local Inst: Instance = NilInst[Idx]
-				if Inst and (Inst:IsA("LocalScript") or Inst:IsA("ModuleScript")) then
-					Found[#Found + 1] = `Nil: {Inst.Name}`
-				end
-			end)
-		end
-	end)
-	
-	return Found
-end
-
-local function ScanActors(): {string}
-	local Found: {string} = {}
-	
-	if not getactors then
-		return Found
-	end
-	
-	SPcall(function(): ()
-		local Actors: {Actor} = getactors()
-		for Idx: number = 1, #Actors do
-			SPcall(function(): ()
-				local Act: Actor = Actors[Idx]
-				for DescIdx: number, Desc: Instance in Act:GetDescendants() do
-					if Desc:IsA("LocalScript") or Desc:IsA("ModuleScript") then
-						Found[#Found + 1] = `Actor: {Desc:GetFullName()}`
-					end
-				end
-			end)
-		end
-	end)
-	
-	return Found
-end
-
 function Bynew.Find(PossibleAC: string?): {string}
 	local Found: {string} = {}
-	local FoundSet: {[string]: boolean} = {}
+	local ByLocation: {[string]: {string}} = {
+		ReplicatedFirst = {},
+		Actor = {},
+		Nil = {}
+	}
 	
-	if PossibleAC then
-		local Functions: {any} = GetAllFunctions()
-		for i: number = 1, #Functions do
-			local Func: any = Functions[i]
-			if SType(Func) == "function" then
-				local ok: boolean, Info: any = SPcall(debug.getinfo, Func)
-				if ok and Info and Info.source then
-					local Source: string = SLower(SToString(Info.source))
-					if SFind(Source, SLower(PossibleAC), 1, true) then
-						if not FoundSet[Info.source] then
-							FoundSet[Info.source] = true
-							Found[#Found + 1] = Info.source
+	local Functions: {any} = GetAllFunctions()
+	local ProcessedScripts: {[LuaSourceContainer]: boolean} = {}
+	
+	for i: number = 1, #Functions do
+		local Func: any = Functions[i]
+		
+		if SType(Func) == "function" then
+			if isexecutorclosure and isexecutorclosure(Func) then
+				continue
+			end
+			
+			if islclosure and not islclosure(Func) then
+				continue
+			end
+			
+			local Scr: LuaSourceContainer?, Location: string = GetScriptLocation(Func)
+			
+			if Scr and not ProcessedScripts[Scr] then
+				if Location == "ReplicatedFirst" or Location == "Actor" or Location == "Nil" then
+					ProcessedScripts[Scr] = true
+					
+					if PossibleAC then
+						local FullName: string = Scr:GetFullName()
+						if SFind(SLower(FullName), SLower(PossibleAC), 1, true) then
+							ByLocation[Location][#ByLocation[Location] + 1] = FullName
+						end
+					else
+						ByLocation[Location][#ByLocation[Location] + 1] = Scr:GetFullName()
+					end
+				end
+			end
+		end
+	end
+	
+	if getreg then
+		local ok: boolean, Reg: any = SPcall(getreg)
+		if ok and Reg then
+			for idx: number = 1, #Reg do
+				local Obj: any = Reg[idx]
+				
+				if SType(Obj) == "function" then
+					if isexecutorclosure and isexecutorclosure(Obj) then
+						continue
+					end
+					
+					if islclosure and not islclosure(Obj) then
+						continue
+					end
+					
+					local Scr: LuaSourceContainer?, Location: string = GetScriptLocation(Obj)
+					
+					if Scr and not ProcessedScripts[Scr] then
+						if Location == "ReplicatedFirst" or Location == "Actor" or Location == "Nil" then
+							ProcessedScripts[Scr] = true
+							
+							if PossibleAC then
+								local FullName: string = Scr:GetFullName()
+								if SFind(SLower(FullName), SLower(PossibleAC), 1, true) then
+									ByLocation[Location][#ByLocation[Location] + 1] = FullName
+								end
+							else
+								ByLocation[Location][#ByLocation[Location] + 1] = Scr:GetFullName()
+							end
+						end
+					end
+				end
+				
+				if typeof(Obj) == "thread" and getscriptfromthread then
+					local ok2: boolean, ThreadScr: any = SPcall(getscriptfromthread, Obj)
+					if ok2 and ThreadScr and not ProcessedScripts[ThreadScr] then
+						if ThreadScr:IsA("LocalScript") or ThreadScr:IsA("ModuleScript") then
+							local Parent: Instance? = ThreadScr.Parent
+							local ThreadLocation: string = "Unknown"
+							
+							if not Parent then
+								ThreadLocation = "Nil"
+							else
+								while Parent do
+									if Parent.Name == "ReplicatedFirst" then
+										ThreadLocation = "ReplicatedFirst"
+										break
+									end
+									if Parent:IsA("Actor") then
+										ThreadLocation = "Actor"
+										break
+									end
+									Parent = Parent.Parent
+								end
+							end
+							
+							if ThreadLocation == "ReplicatedFirst" or ThreadLocation == "Actor" or ThreadLocation == "Nil" then
+								ProcessedScripts[ThreadScr] = true
+								
+								if PossibleAC then
+									local FullName: string = ThreadScr:GetFullName()
+									if SFind(SLower(FullName), SLower(PossibleAC), 1, true) then
+										ByLocation[ThreadLocation][#ByLocation[ThreadLocation] + 1] = FullName
+									end
+								else
+									ByLocation[ThreadLocation][#ByLocation[ThreadLocation] + 1] = ThreadScr:GetFullName()
+								end
+							end
 						end
 					end
 				end
 			end
 		end
-	else
-		local GCResults: {string} = ScanGarbageCollector()
-		for i: number = 1, #GCResults do
-			if not FoundSet[GCResults[i]] then
-				FoundSet[GCResults[i]] = true
-				Found[#Found + 1] = GCResults[i]
-			end
-		end
-		
-		local RegResults: {string} = ScanRegistry()
-		for i: number = 1, #RegResults do
-			if not FoundSet[RegResults[i]] then
-				FoundSet[RegResults[i]] = true
-				Found[#Found + 1] = RegResults[i]
-			end
-		end
-		
-		local NilResults: {string} = ScanNilInstances()
-		for i: number = 1, #NilResults do
-			if not FoundSet[NilResults[i]] then
-				FoundSet[NilResults[i]] = true
-				Found[#Found + 1] = NilResults[i]
-			end
-		end
-		
-		local ActorResults: {string} = ScanActors()
-		for i: number = 1, #ActorResults do
-			if not FoundSet[ActorResults[i]] then
-				FoundSet[ActorResults[i]] = true
-				Found[#Found + 1] = ActorResults[i]
-			end
-		end
-		
-		local ok: boolean, RepFirst: any = SPcall(function(): Instance
-			return Services.ReplicatedFirst
-		end)
-		
-		if ok and RepFirst then
-			for idx: number, Child: Instance in RepFirst:GetDescendants() do
-				if Child:IsA("LocalScript") or Child:IsA("ModuleScript") then
-					local Path: string = `ReplicatedFirst: {Child:GetFullName()}`
-					if not FoundSet[Path] then
-						FoundSet[Path] = true
-						Found[#Found + 1] = Path
-					end
-				end
-			end
+	end
+	
+	if #ByLocation.ReplicatedFirst > 0 then
+		for i: number = 1, #ByLocation.ReplicatedFirst do
+			SWarn(`ReplicatedFirst: {ByLocation.ReplicatedFirst[i]}`)
+			Found[#Found + 1] = ByLocation.ReplicatedFirst[i]
 		end
 	end
 	
-	if #Found > 0 then
-		for i: number = 1, #Found do
-			SWarn(Found[i])
+	if #ByLocation.Actor > 0 then
+		for i: number = 1, #ByLocation.Actor do
+			SWarn(`Actor: {ByLocation.Actor[i]}`)
+			Found[#Found + 1] = ByLocation.Actor[i]
+		end
+	end
+	
+	if #ByLocation.Nil > 0 then
+		for i: number = 1, #ByLocation.Nil do
+			SWarn(`Nil: {ByLocation.Nil[i]}`)
+			Found[#Found + 1] = ByLocation.Nil[i]
 		end
 	end
 	
