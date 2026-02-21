@@ -26,7 +26,7 @@
 </a>
 </td>
 <td align="center">
-<a href="https://guns.lol/Noctryx">
+<a href="https://guns.lol/Noctryxzen">
 <img src="https://assets.guns.lol/guns_logo_no_background_cropped.png" width="32"><br>
 <img src="https://img.shields.io/badge/Guns.lol-darkred?style=for-the-badge&color=990000">
 </a>
